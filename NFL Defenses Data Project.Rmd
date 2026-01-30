@@ -1,0 +1,271 @@
+---
+title: "STA 160 Final Project"
+author: "Ethan Park"
+date: "2025-06-04"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+```
+
+```{r}
+library(dplyr)
+plays = read.csv('plays.csv')
+player_play = read.csv('player_play.csv')
+
+str(plays)
+length(unique(paste(plays$playId, plays$gameId)))
+str(player_play)
+length(unique(paste(plays$playId, plays$gameId)))
+
+plays %>%
+  filter(!is.na(defensiveTeam)) %>%
+  summarise(num_plays = n()) # number of defensive plays (16,124 in total)
+```
+
+50 total variables in first dataset (plays.csv.) Key variables to note for this exploratory analysis: defensiveTeam, passCoverage, yardsGained (success metric), and manZone. 
+
+49 total variables in second dataset (player_play.csv.) 
+
+Note: dataset has been cleaned of all penalty plays, so every play int his dataset has been completed. Total of 16,124 plays. 
+
+```{r}
+ManZone = plays[c("defensiveTeam", "pff_passCoverage", "pff_manZone", "yardsGained", "expectedPointsAdded")]
+
+Zone = filter(ManZone, pff_manZone == "Zone")
+Man = filter(ManZone, pff_manZone == "Man")
+Other = filter(ManZone, pff_manZone == "Other")
+sum(Other$pff_passCoverage == "Red Zone")/nrow(Other)
+```
+10,969 zone plays, 4,145 man plays, 818 other plays (including Red Zone, Goal Line, and Bracket) out of 16,124 total plays. 
+
+```{r}
+library(ggplot2)
+
+# Filter out plays with NA coverage
+coverage_freq <- plays %>%
+  filter(!is.na(pff_manZone)) %>%
+  group_by(defensiveTeam, pff_manZone) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(defensiveTeam) %>%
+  mutate(prop = count / sum(count))  # proportion of each coverage per team
+
+# Get order of teams by ascending "Man" coverage proportion
+man_order <- coverage_freq %>%
+  filter(pff_manZone == "Man") %>%
+  arrange(desc(prop)) %>%
+  pull(defensiveTeam)
+
+# Set factor levels to reflect this order
+coverage_freq$defensiveTeam <- factor(coverage_freq$defensiveTeam, levels = man_order)
+
+# Plot: stacked bar chart of coverage type proportions
+ggplot(coverage_freq, aes(x = defensiveTeam, y = prop, fill = pff_manZone)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Defensive Coverage Type by Team", x = "Team", y = "Proportion of Plays", fill = "Coverage Type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+```{r}
+# Team defensive statistics dataframe
+# Ensure logical values
+player_play$causedPressure <- as.logical(player_play$causedPressure)
+player_play$quarterbackHit <- as.numeric(player_play$quarterbackHit)
+player_play$hadInterception <- as.numeric(player_play$hadInterception)
+player_play$sackYardsAsDefense <- abs(as.numeric(player_play$sackYardsAsDefense))
+
+# Aggregate per play if pressure was caused
+pressure_plays <- aggregate(causedPressure ~ gameId + playId, data = player_play, FUN = any)
+
+# Merge with plays to bring in defensive team
+pressure_data <- merge(pressure_plays, plays[, c("gameId", "playId", "defensiveTeam")], by = c("gameId", "playId"))
+
+# Calculate pressure rate per team
+team_pressure_rate <- aggregate(causedPressure ~ defensiveTeam, data = pressure_data, FUN = mean)
+
+# Aggregate quarterbackHit, sackYards, and interceptions at play level
+play_stats <- aggregate(cbind(quarterbackHit, sackYardsAsDefense, hadInterception) ~ gameId + playId,data = player_play, FUN = sum)
+# Step 5: Merge with plays to get defensive team for each play
+play_stats <- merge(play_stats, plays[, c("gameId", "playId", "defensiveTeam")], by = c("gameId", "playId"))
+
+# Aggregate those new stats per team
+team_def_stats <- aggregate(cbind(quarterbackHit, sackYardsAsDefense, hadInterception) ~ defensiveTeam, data = play_stats, FUN = mean)
+
+# Merge all stats together
+team_stats <- merge(team_pressure_rate, team_def_stats, by = "defensiveTeam")
+
+# Rename for clarity and order by pressure rate
+names(team_stats)[2] <- "pressure_rate"
+names(team_stats)[3] <- "quarterbackHit_rate"
+names(team_stats)[4] <- "avg_sackYardsAsDefense"
+names(team_stats)[5] <- "interception_rate"
+
+team_stats <- team_stats[order(team_stats$interception_rate, decreasing = TRUE), ]
+
+# View results
+print(team_stats)
+
+```
+
+
+```{r}
+# Other team features
+library(tibble)
+library(ggplot2)
+library(ggrepel)
+team_features <- plays  %>%
+  group_by(defensiveTeam) %>%
+  summarise(
+    avg_epa = mean(expectedPointsAdded, na.rm = TRUE),
+    avg_yards = mean(yardsGained, na.rm = TRUE),
+    pct_zone = mean(pff_manZone == "Zone", na.rm = TRUE),
+    pct_man = mean(pff_manZone == "Man", na.rm = TRUE)
+  ) %>%
+    column_to_rownames("defensiveTeam")
+team_features <- mutate_all(team_features, as.numeric)
+team_features
+```
+Expected points added (EPA) is an advanced metric that takes into account the down and distance, field position, and game situation (quarter, score margin, etc.) The average EPA in this data frame gives the average 
+
+
+```{r}
+
+# Convert rownames of team_features to a column
+team_features$defensiveTeam <- rownames(team_features)
+
+# Merge on defensiveTeam
+combined_team_stats <- merge(team_features, team_stats, by = "defensiveTeam")
+
+# Reorder by a specific metric (e.g., pressure_rate)
+combined_team_stats <- combined_team_stats[order(combined_team_stats$pressure_rate, decreasing = TRUE), ]
+
+combined_team_stats <- as.data.frame(combined_team_stats)
+rownames(combined_team_stats) <- combined_team_stats$defensiveTeam
+combined_team_stats$defensiveTeam <- NULL
+
+print(combined_team_stats)
+
+```
+
+```{r}
+# Make sure team_stats has rownames as team identifiers
+combined_team_stats$Team <- rownames(combined_team_stats)
+
+# Order factor levels by pressure_rate (descending)
+combined_team_stats$Team <- factor(combined_team_stats$Team, levels = combined_team_stats$Team[order(combined_team_stats$pressure_rate, decreasing = TRUE)])
+
+# Plot bar chart
+ggplot(combined_team_stats, aes(x = Team, y = pressure_rate)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Pressure Rate by Team",
+       x = "Team",
+       y = "Pressure Rate") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+combined_team_stats$Team <- NULL
+combined_team_stats$cluster <- NULL
+```
+
+```{r}
+library(ggcorrplot)
+cor_matrix <- cor(combined_team_stats)
+ggcorrplot(cor_matrix, lab = TRUE, type = "upper", title = "Correlation Matrix for Team Defensive Features", colors = c("red", "white", "blue"))
+```
+
+Key metrics to note from correlation table: 
+- Strong positive correlation between quarterback hit rate and pressure rate (.74)
+- 
+
+```{r}
+## clustering (data science portion)
+# Scale original features
+scaled_stats <- scale(combined_team_stats)
+scaled_stats
+
+# Elbow method to determine optimal k
+set.seed(123)
+wss <- sapply(1:10, function(k) {kmeans(scaled_stats, centers = k, nstart = 25)$tot.withinss})
+
+plot(1:10, wss, type = "b",
+     main = "Elbow Method for Optimal K",
+     xlab = "Number of Clusters", ylab = "Total Within-Cluster SS")
+```
+
+```{r}
+
+# K-means clustering on original features
+set.seed(123)
+k_raw <- 3
+kmeans_raw <- kmeans(scaled_stats, centers = k_raw, nstart = 25)
+
+# Add cluster labels
+raw_clusters <- as.factor(kmeans_raw$cluster)
+raw_clusters
+
+# Create a named vector of teams with cluster labels
+team_cluster_map <- data.frame(
+  Team = rownames(combined_team_stats),
+  Cluster = raw_clusters
+)
+
+# Split into a list of teams by cluster
+teams_by_cluster <- split(team_cluster_map$Team, team_cluster_map$Cluster)
+
+# View the result
+print(teams_by_cluster)
+
+# Add clusters to original data
+clustered_team_stats <- combined_team_stats
+clustered_team_stats$cluster <- raw_clusters
+
+# Summarize cluster profiles
+final_data <- aggregate(. ~ cluster, data = clustered_team_stats, FUN = mean)
+final_data
+```
+
+```{r}
+library(reshape2)
+# Melt and plot cluster profiles
+df_melt <- melt(aggregate(. ~ cluster, data = clustered_team_stats, FUN = mean), id.vars = "cluster")
+ggplot(df_melt, aes(x = variable, y = value, fill = factor(cluster))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Cluster Profiles: Team Defensive Metrics", x = "Metric", y = "Average", fill = "Cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+# PCA on scaled data
+pca <- prcomp(scaled_stats)
+
+# Use first 2 principal components
+pca_data <- pca$x[, 1:2]
+
+set.seed(123)
+kmeans_pca <- kmeans(pca_data, centers = k_raw, nstart = 25)
+
+# Assign PCA cluster labels
+pca_clusters <- as.factor(kmeans_pca$cluster)
+
+cluster_comparison <- data.frame(
+  Team = rownames(combined_team_stats),
+  Cluster_Raw = raw_clusters,
+  Cluster_PCA = pca_clusters
+)
+
+# Display comparison table
+print(cluster_comparison)
+
+# Count how many teams have different cluster assignments
+cat("Number of differences in cluster labels:", sum(cluster_comparison$Cluster_Raw != cluster_comparison$Cluster_PCA))
+
+ggplot(data.frame(pca_data, Cluster = pca_clusters, Team = rownames(combined_team_stats)), 
+       aes(x = PC1, y = PC2, color = Cluster, label = Team)) +
+  geom_point(size = 3) +
+  geom_text(vjust = -0.5, size = 3) +
+  labs(title = "Team Clusters from PCA-Reduced Features", x = "PC1", y = "PC2") +
+  theme_minimal()
+```
